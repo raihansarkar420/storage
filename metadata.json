@@ -1,0 +1,6 @@
+{
+  "name": "Personal Cloud Storage",
+  "description": "Minimalist, responsive personal cloud storage web app with Supabase authentication, folder hierarchy, storage management, and internal file transfer.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
