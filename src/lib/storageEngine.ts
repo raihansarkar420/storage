@@ -237,6 +237,22 @@ export const DEFAULT_SUPABASE_KEY =
   (import.meta as any).env?.VITE_SUPABASE_ANON_KEY ||
   'sb_publishable_XP_RjeJS-oh5v3xP96xE3A_jfqGCqUO';
 
+export function isValidUUID(id?: string | null): boolean {
+  if (!id) return false;
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id);
+}
+
+export function generateUUID(): string {
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+    return crypto.randomUUID();
+  }
+  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (c) => {
+    const r = (Math.random() * 16) | 0;
+    const v = c === 'x' ? r : (r & 0x3) | 0x8;
+    return v.toString(16);
+  });
+}
+
 export class StorageService {
   private static client: SupabaseClient | null = null;
 
@@ -329,15 +345,59 @@ export class StorageService {
     localStorage.setItem(STORAGE_KEY_CURRENT_USER, JSON.stringify(user));
   }
 
-  // Create or Sign-In user by email (Passwordless / OTP / Magic Link)
+  // Create or Sign-In user by email with Supabase Auth integration
   static async authenticateUser(email: string): Promise<Profile> {
     const trimmed = email.trim().toLowerCase();
+    const client = this.getClient();
+    let supabaseUserId: string | null = null;
+    let authNotice: string | null = null;
+
+    if (client) {
+      try {
+        const autoPassword = `CloudStorage_${trimmed}_Auth!2026`;
+
+        // 1. Try signing in with deterministic password
+        const signInRes = await client.auth.signInWithPassword({
+          email: trimmed,
+          password: autoPassword,
+        });
+
+        if (signInRes.data?.user) {
+          supabaseUserId = signInRes.data.user.id;
+        } else {
+          // 2. Try sign up
+          const signUpRes = await client.auth.signUp({
+            email: trimmed,
+            password: autoPassword,
+            options: {
+              data: {
+                full_name: trimmed.split('@')[0],
+              },
+            },
+          });
+
+          if (signUpRes.error) {
+            console.warn('Supabase Auth signUp response:', signUpRes.error.message);
+            if (signUpRes.error.message.includes('rate limit')) {
+              authNotice = 'Supabase email rate limit reached. Tip: Turn OFF "Confirm email" in Supabase: Authentication -> Providers -> Email for instant logins.';
+            } else {
+              authNotice = signUpRes.error.message;
+            }
+          } else if (signUpRes.data?.user) {
+            supabaseUserId = signUpRes.data.user.id;
+          }
+        }
+      } catch (err: any) {
+        console.warn('Supabase auth catch:', err);
+      }
+    }
+
     const profiles = this.getProfiles();
     let existing = profiles.find((p) => p.email.toLowerCase() === trimmed);
 
     if (!existing) {
       const newProfile: Profile = {
-        id: 'usr_' + Math.random().toString(36).substring(2, 9),
+        id: supabaseUserId || (isValidUUID(trimmed) ? trimmed : generateUUID()),
         email: trimmed,
         full_name: trimmed.split('@')[0],
         avatar_url: `https://api.dicebear.com/7.x/initials/svg?seed=${encodeURIComponent(trimmed)}`,
@@ -346,17 +406,41 @@ export class StorageService {
       profiles.push(newProfile);
       this.saveProfiles(profiles);
       existing = newProfile;
+    } else if (supabaseUserId && existing.id !== supabaseUserId) {
+      existing.id = supabaseUserId;
+      this.saveProfiles(profiles);
     }
 
     this.setCurrentUser(existing);
+
+    // Sync to Supabase profiles table if client is initialized
+    if (client && supabaseUserId) {
+      try {
+        await client.from('profiles').upsert({
+          id: supabaseUserId,
+          email: trimmed,
+          full_name: existing.full_name,
+          avatar_url: existing.avatar_url,
+          updated_at: new Date().toISOString(),
+        });
+      } catch (e) {
+        console.warn('Profile upsert note:', e);
+      }
+    }
+
+    if (authNotice) {
+      console.info(authNotice);
+    }
+
     return existing;
   }
 
-  // Create Folder
+  // Create Folder with Supabase sync
   static createFolder(name: string, parentId: string | null, user: Profile): FileItem {
     const files = this.getFiles();
+    const newId = generateUUID();
     const newFolder: FileItem = {
-      id: 'fld_' + Math.random().toString(36).substring(2, 10),
+      id: newId,
       name: name.trim() || 'New Folder',
       type: 'folder',
       size: 0,
@@ -371,10 +455,27 @@ export class StorageService {
 
     files.push(newFolder);
     this.saveFiles(files);
+
+    // Sync to Supabase files table if client is available
+    const client = this.getClient();
+    if (client && isValidUUID(user.id)) {
+      client.from('files').insert({
+        id: newId,
+        name: newFolder.name,
+        type: 'folder',
+        size: 0,
+        is_folder: true,
+        parent_id: parentId && isValidUUID(parentId) ? parentId : null,
+        owner_id: user.id,
+      }).then(({ error }) => {
+        if (error) console.warn('Supabase createFolder notice:', error.message);
+      });
+    }
+
     return newFolder;
   }
 
-  // Upload File
+  // Upload File with Supabase sync
   static uploadFile(
     file: File,
     contentPreview: string,
@@ -383,8 +484,9 @@ export class StorageService {
   ): FileItem {
     const files = this.getFiles();
     const ext = file.name.split('.').pop() || '';
+    const newId = generateUUID();
     const newFile: FileItem = {
-      id: 'fil_' + Math.random().toString(36).substring(2, 10),
+      id: newId,
       name: file.name,
       type: file.type || ext || 'application/octet-stream',
       size: file.size,
@@ -401,10 +503,28 @@ export class StorageService {
 
     files.push(newFile);
     this.saveFiles(files);
+
+    // Sync to Supabase files table
+    const client = this.getClient();
+    if (client && isValidUUID(user.id)) {
+      client.from('files').insert({
+        id: newId,
+        name: newFile.name,
+        type: newFile.type,
+        size: newFile.size,
+        storage_path: newFile.storage_path,
+        is_folder: false,
+        parent_id: parentId && isValidUUID(parentId) ? parentId : null,
+        owner_id: user.id,
+      }).then(({ error }) => {
+        if (error) console.warn('Supabase uploadFile notice:', error.message);
+      });
+    }
+
     return newFile;
   }
 
-  // Cascading Item Deletion
+  // Cascading Item Deletion with Supabase sync
   static deleteItem(itemId: string, user: Profile): { deletedCount: number; deletedNames: string[] } {
     const files = this.getFiles();
     const itemToDelete = files.find((f) => f.id === itemId && f.owner_id === user.id);
@@ -428,6 +548,17 @@ export class StorageService {
 
     const remainingFiles = files.filter((f) => !idsToDelete.has(f.id));
     this.saveFiles(remainingFiles);
+
+    // Sync deletion to Supabase
+    const client = this.getClient();
+    if (client && isValidUUID(user.id)) {
+      const validUuids = Array.from(idsToDelete).filter((id) => isValidUUID(id));
+      if (validUuids.length > 0) {
+        client.from('files').delete().in('id', validUuids).then(({ error }) => {
+          if (error) console.warn('Supabase delete notice:', error.message);
+        });
+      }
+    }
 
     return {
       deletedCount: idsToDelete.size,
@@ -518,6 +649,22 @@ export class StorageService {
     transfers.unshift(newRecord);
     this.saveTransfers(transfers);
 
+    // Sync transfer to Supabase
+    const client = this.getClient();
+    if (client && isValidUUID(currentUser.id) && isValidUUID(recipient.id)) {
+      client.rpc('transfer_item', {
+        target_item_id: rootItem.id,
+        recipient_email: recipient.email,
+        transfer_note: note.trim() || null,
+      }).then(({ error }) => {
+        if (error) {
+          client.from('files')
+            .update({ owner_id: recipient.id, is_transferred: true, transferred_at: new Date().toISOString() })
+            .in('id', Array.from(targetIds));
+        }
+      });
+    }
+
     return {
       success: true,
       count: targetIds.size,
@@ -525,7 +672,7 @@ export class StorageService {
     };
   }
 
-  // Rename item
+  // Rename item with Supabase sync
   static renameItem(itemId: string, newName: string, user: Profile): boolean {
     const files = this.getFiles();
     const idx = files.findIndex((f) => f.id === itemId && f.owner_id === user.id);
@@ -534,6 +681,18 @@ export class StorageService {
     files[idx].name = newName.trim();
     files[idx].updated_at = new Date().toISOString();
     this.saveFiles(files);
+
+    // Sync rename to Supabase
+    const client = this.getClient();
+    if (client && isValidUUID(user.id) && isValidUUID(itemId)) {
+      client.from('files')
+        .update({ name: newName.trim(), updated_at: new Date().toISOString() })
+        .eq('id', itemId)
+        .then(({ error }) => {
+          if (error) console.warn('Supabase rename notice:', error.message);
+        });
+    }
+
     return true;
   }
 
