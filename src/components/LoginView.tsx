@@ -33,26 +33,26 @@ export default function LoginView({ onLoginSuccess, onOpenSqlModal }: LoginViewP
     setIsLoading(true);
     setError(null);
 
-    // Instant direct sign-in / sign-up by email
-    setTimeout(async () => {
-      try {
-        const user = await StorageService.authenticateUser(cleanEmail);
-        setIsLoading(false);
-        onLoginSuccess(user);
-      } catch (err: any) {
-        setIsLoading(false);
-        setError(err?.message || 'Authentication failed.');
-      }
-    }, 300);
+    try {
+      const user = await StorageService.authenticateUser(cleanEmail);
+      setIsLoading(false);
+      onLoginSuccess(user);
+    } catch (err: any) {
+      setIsLoading(false);
+      setError(err?.message || 'Authentication failed.');
+    }
   };
 
   const handleDirectDemoLogin = async (demoUser: Profile) => {
     setIsLoading(true);
-    setTimeout(async () => {
+    try {
       const user = await StorageService.authenticateUser(demoUser.email);
       setIsLoading(false);
       onLoginSuccess(user);
-    }, 200);
+    } catch (err: any) {
+      setIsLoading(false);
+      setError(err?.message || 'Demo login failed.');
+    }
   };
 
   return (
