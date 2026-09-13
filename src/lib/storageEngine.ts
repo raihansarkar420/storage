@@ -329,20 +329,120 @@ export class StorageService {
     localStorage.setItem(STORAGE_KEY_TRANSFERS, JSON.stringify(transfers));
   }
 
-  static getCurrentUser(): Profile {
+  static getCurrentUser(): Profile | null {
     try {
       const data = localStorage.getItem(STORAGE_KEY_CURRENT_USER);
       if (data) return JSON.parse(data);
     } catch (e) {
       console.error(e);
     }
-    const defaultUser = DEMO_USERS[0];
-    localStorage.setItem(STORAGE_KEY_CURRENT_USER, JSON.stringify(defaultUser));
-    return defaultUser;
+    return null;
   }
 
   static setCurrentUser(user: Profile) {
     localStorage.setItem(STORAGE_KEY_CURRENT_USER, JSON.stringify(user));
+  }
+
+  static async logout(): Promise<void> {
+    localStorage.removeItem(STORAGE_KEY_CURRENT_USER);
+    const client = this.getClient();
+    if (client) {
+      try {
+        await client.auth.signOut();
+      } catch (e) {
+        console.warn('Supabase signOut notice:', e);
+      }
+    }
+  }
+
+  // Fetch files owned by user from Supabase
+  static async fetchUserFiles(user: Profile): Promise<FileItem[]> {
+    const client = this.getClient();
+    let remoteFiles: FileItem[] = [];
+
+    if (client && isValidUUID(user.id)) {
+      try {
+        const { data, error } = await client
+          .from('files')
+          .select('*')
+          .eq('owner_id', user.id)
+          .order('created_at', { ascending: false });
+
+        if (!error && data) {
+          remoteFiles = data.map((f: any) => ({
+            id: f.id,
+            name: f.name,
+            type: f.type || (f.is_folder ? 'folder' : 'application/octet-stream'),
+            size: Number(f.size || 0),
+            storage_path: f.storage_path,
+            is_folder: Boolean(f.is_folder),
+            parent_id: f.parent_id || null,
+            owner_id: f.owner_id,
+            owner_email: user.email,
+            created_at: f.created_at,
+            updated_at: f.updated_at,
+            is_transferred: Boolean(f.is_transferred),
+            original_owner_email: f.original_owner_email || undefined,
+            download_url: f.storage_path || undefined,
+          }));
+        }
+      } catch (e) {
+        console.warn('Error fetching files from Supabase:', e);
+      }
+    }
+
+    // Merge into local storage cache
+    const allLocal = this.getFiles();
+    const otherUserFiles = allLocal.filter((f) => f.owner_id !== user.id);
+    const merged = [...remoteFiles, ...otherUserFiles];
+    this.saveFiles(merged);
+
+    // If user has files in Supabase, return them.
+    // If not, return whatever local files match this user (or empty)
+    if (remoteFiles.length > 0) {
+      return remoteFiles;
+    }
+    return allLocal.filter((f) => f.owner_id === user.id);
+  }
+
+  // Fetch transfers for user from Supabase
+  static async fetchUserTransfers(user: Profile): Promise<TransferRecord[]> {
+    const client = this.getClient();
+    let remoteTransfers: TransferRecord[] = [];
+
+    if (client && isValidUUID(user.id)) {
+      try {
+        const { data, error } = await client
+          .from('transfers')
+          .select('*')
+          .or(`sender_id.eq.${user.id},recipient_id.eq.${user.id}`)
+          .order('transferred_at', { ascending: false });
+
+        if (!error && data) {
+          remoteTransfers = data.map((t: any) => ({
+            id: t.id,
+            file_id: t.file_id,
+            file_name: t.file_name,
+            is_folder: Boolean(t.is_folder),
+            sender_id: t.sender_id,
+            sender_email: t.sender_email,
+            recipient_id: t.recipient_id,
+            recipient_email: t.recipient_email,
+            transferred_at: t.transferred_at,
+            note: t.note || undefined,
+          }));
+        }
+      } catch (e) {
+        console.warn('Error fetching transfers from Supabase:', e);
+      }
+    }
+
+    if (remoteTransfers.length > 0) {
+      this.saveTransfers(remoteTransfers);
+      return remoteTransfers;
+    }
+
+    return this.getTransfers();
   }
 
   // Create or Sign-In user by email with Supabase Auth integration
