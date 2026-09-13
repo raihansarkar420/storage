@@ -81,10 +81,32 @@ export default function App() {
   };
 
   // Synchronize state when storage updates
-  const refreshData = () => {
+  const refreshData = async () => {
+    if (currentUser) {
+      await StorageService.fetchUserFiles(currentUser);
+      await StorageService.fetchUserTransfers(currentUser);
+    }
     setFiles(StorageService.getFiles());
     setTransfers(StorageService.getTransfers());
   };
+
+  // Automatically fetch fresh data from Supabase whenever user logs in or switches
+  useEffect(() => {
+    if (!currentUser) return;
+    let isMounted = true;
+
+    StorageService.fetchUserFiles(currentUser).then(() => {
+      if (isMounted) setFiles(StorageService.getFiles());
+    });
+
+    StorageService.fetchUserTransfers(currentUser).then(() => {
+      if (isMounted) setTransfers(StorageService.getTransfers());
+    });
+
+    return () => {
+      isMounted = false;
+    };
+  }, [currentUser?.id]);
 
   // Compute User Storage Stats
   const stats: StorageStats = useMemo(() => {
@@ -247,8 +269,13 @@ export default function App() {
     showToast(`Switched account to ${newUser.email}`, 'info');
   };
 
-  const handleLogout = () => {
+  const handleLogout = async () => {
+    await StorageService.logout();
     setCurrentUser(null);
+    setCurrentFolderId(null);
+    setFiles([]);
+    setTransfers([]);
+    showToast('Signed out successfully', 'info');
   };
 
   const handleResetDatabase = () => {
@@ -264,9 +291,9 @@ export default function App() {
   if (!currentUser) {
     return (
       <LoginView
-        onLoginSuccess={(user) => {
+        onLoginSuccess={async (user) => {
           setCurrentUser(user);
-          refreshData();
+          await refreshData();
           showToast(`Welcome, ${user.email}!`, 'success');
         }}
         onOpenSqlModal={() => setSqlModalOpen(true)}
